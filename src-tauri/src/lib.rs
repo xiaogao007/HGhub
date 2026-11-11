@@ -1,4 +1,5 @@
 mod api;
+mod edge_crypto;
 mod media;
 mod net;
 mod session;

@@ -57,6 +57,7 @@ export type PlayInfo = {
   title: string;
   video_url: string;
   video_url_hevc?: string;
+  proxy_url?: string;
 };
 
 export type RankItem = {

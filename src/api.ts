@@ -75,7 +75,7 @@ export async function selfTest(): Promise<string> {
   try {
     const info = await api.play(117, 3);
     steps.push(`play:${info?.video_url ? "ok" : "empty"}`);
-    const hlsUrl = `${LOCAL}/hls?u=${encodeURIComponent(info.video_url)}`;
+    const hlsUrl = info.proxy_url || playlist(info.video_url);
     const r1 = await fetch(hlsUrl);
     const txt = await r1.text();
     steps.push(`hls:${r1.status}/${txt.length}/${txt.startsWith("#EXTM3U") ? "m3u8" : "bad"}`);
@@ -86,7 +86,9 @@ export async function selfTest(): Promise<string> {
         const rustUrl = m[1];
         steps.push(`rustUrl:${rustUrl.slice(0, 60)}`);
         // A/B：用 JS 重新编码同一条上游地址
-        const inner = decodeURIComponent(rustUrl.split("?u=")[1] || "");
+        const resource = new URL(rustUrl);
+        const inner = resource.searchParams.get("u") || "";
+        const context = resource.searchParams.get("c");
         steps.push(`inner:${inner.slice(0, 50)}`);
         try {
           const rk = await fetch(rustUrl);
@@ -94,7 +96,7 @@ export async function selfTest(): Promise<string> {
           steps.push(`keyRust:${rk.status}/${bk.byteLength}`);
         } catch (e) { steps.push(`keyRust:throw:${(e as Error).message.slice(0, 30)}`); }
         try {
-          const rk2 = await fetch(`${LOCAL}/seg?u=${encodeURIComponent(inner)}`);
+          const rk2 = await fetch(`${LOCAL}/seg?u=${encodeURIComponent(inner)}${context ? `&c=${encodeURIComponent(context)}` : ""}`);
           const bk2 = await rk2.arrayBuffer();
           steps.push(`keyJs:${rk2.status}/${bk2.byteLength}`);
         } catch (e) { steps.push(`keyJs:throw:${(e as Error).message.slice(0, 30)}`); }
@@ -142,7 +144,7 @@ export const dur = (s?: number | string) => {
 export async function mediaPlaybackProbe(): Promise<string> {
   const Hls = (await import("hls.js")).default;
   const info = await api.play(117, 3);
-  const src = playlist(info.video_url);
+  const src = info.proxy_url || playlist(info.video_url);
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;

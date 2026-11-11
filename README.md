@@ -77,9 +77,9 @@ pnpm android:build    # 产出 APK
 
 ## 实现要点
 
-1. **统一边缘信封**：站点把 `/api/**` 收敛为 `POST /api/edge/request`（`method/path/body(base64)/content_type` + `Authorization: Bearer`），本项目只对接这一个入口，无需处理 Cookie。
+1. **边缘请求**：列表等请求使用 `POST /api/edge/request`；播放改用业务路径 `POST /api/videos/{id}/episodes/{ep}/playback`，经独立的 `POST /api/playback/request` 加密通道传输（ECDH P-256 → HKDF-SHA256 → AES-256-GCM）。会话过期会重新握手，密钥仅驻留内存；继续使用服务端签发的 Bearer 登录态。
 2. **封面解密**：封面为 AES-128-CBC 密文，Rust 侧解密后经自定义协议输出，前端 `<img>` 直接使用。
-3. **HLS 代理**：m3u8 与分片经自定义协议转发并改写 `#EXT-X-KEY` / 分片地址，绕开 WebView 的 CORS 与防盗链。
+3. **HLS 代理**：m3u8、嵌套清单、key 与分片经自定义协议转发。CDN 临时请求头按播放上下文留在 Rust 内存中，仅发送到对应媒体源；清单缓存按上下文隔离。
 4. **自定义协议**：Windows 为 `http://hg.localhost/*`，Android 为 `https://hg.localhost/*`（由 Rust 侧按平台生成，避免 WebView 无法解析）。
 5. **不做签名逆向**：只复用浏览器同源行为，接口字段均有文档与实测样本。
 

@@ -40,6 +40,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const [epMap, setEpMap] = useState<Record<number, number>>({});
   const [details, setDetails] = useState<Record<number, Detail>>({});
   const [playUrls, setPlayUrls] = useState<Record<string, string>>({});
+  const [playAttempt, setPlayAttempt] = useState(0);
   const [cards, setCards] = useState<Record<number, VideoCard>>({});
   const [posts, setPosts] = useState<Record<number, Post>>({});
 
@@ -197,18 +198,34 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   useEffect(() => {
     if (!curId) return;
     if (playUrls[playKey]) return;
+    setErr("");
+    setWaiting(true);
     let alive = true;
     api.play(curId, curEp)
       .then((info) => {
         if (!alive) return;
-        if (!info?.video_url) throw new Error("暂无播放地址");
-        setPlayUrls((m) => ({ ...m, [playKey]: info.video_url }));
+        const url = info?.proxy_url?.trim() || info?.video_url?.trim();
+        if (!url) throw new Error("播放接口未返回可用地址，请稍后重试");
+        setPlayUrls((m) => ({ ...m, [playKey]: url }));
         addHistory(curId);
       })
-      .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
+      .catch((e) => {
+        if (alive) { setWaiting(false); setErr((e as Error).message || "取播放地址失败"); }
+      });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [curId, curEp]);
+  }, [curId, curEp, playAttempt]);
+
+  const retryPlayback = () => {
+    setPlayUrls((urls) => {
+      const next = { ...urls };
+      delete next[playKey];
+      return next;
+    });
+    setErr("");
+    setWaiting(true);
+    setPlayAttempt((attempt) => attempt + 1);
+  };
 
   /* 切换条目/集数时重置播放状态 */
   useEffect(() => {
@@ -477,14 +494,14 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
               {isActive && playUrl ? (
                 <div className="absolute inset-0" style={{ touchAction: "pan-y" }}
                   onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp}>
-                <VideoSurface ref={videoRef} src={playUrl} poster={posterUrl} autoPlay muted={muted}
+                <VideoSurface key={`${playKey}:${playAttempt}`} ref={videoRef} src={playUrl} poster={posterUrl} autoPlay muted={muted}
                   volume={volume} rate={effRate}
                   fit={isDesktop || (vsize.w > 0 && vsize.w > vsize.h) ? "contain" : "cover"}
                   onClick={() => { if (isDesktop) videoRef.current?.toggle(); }}
                   onTime={setTime}
                   onDuration={setDuration}
                   onSize={(w, h) => setVsize({ w, h })}
-                  onPlaying={() => { setPaused(false); setWaiting(false); }}
+                  onPlaying={() => { setErr(""); setPaused(false); setWaiting(false); }}
                   onPause={() => setPaused(true)}
                   onWaiting={() => setWaiting(true)}
                   onEnded={() => { const next = episodes.find((e) => e.ep_num === curEp + 1); if (next) pickEp(next.ep_num); }}
@@ -650,7 +667,7 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   <div className="bg-black/70 rounded-xl p-5 flex flex-col items-center gap-3 text-[13px] text-white/90">
                     <span>视频暂时无法加载</span>
                     <span className="text-[10.5px] text-white/45 max-w-[240px] text-center break-all">{err}</span>
-                    <button className="text-primary text-[12.5px]" onClick={() => { setErr(""); setWaiting(true); videoRef.current?.play(); }}>重试</button>
+                    <button type="button" className="text-primary text-[12.5px] hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary active:opacity-70" onClick={retryPlayback}>重试</button>
                   </div>
                 </div>
               )}

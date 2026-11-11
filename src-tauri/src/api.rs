@@ -26,9 +26,7 @@ impl Api {
     }
 
     async fn authed(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
-        let token = self
-            .token()
-            .ok_or_else(|| "请先登录".to_string())?;
+        let token = self.token().ok_or_else(|| "请先登录".to_string())?;
         edge(method, path, body, Some(&token)).await
     }
 }
@@ -41,7 +39,11 @@ pub async fn debug_log(app: tauri::AppHandle, msg: String) -> Result<(), String>
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("debug.log");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{}", msg);
     }
     Ok(())
@@ -190,9 +192,42 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
 
 #[tauri::command]
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
-    state
-        .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
-        .await
+    if id <= 0 || ep == 0 || ep > i32::MAX as u32 {
+        return Err("无效的视频或集号".into());
+    }
+    let token = state.token();
+    let data = edge(
+        "POST",
+        &format!("/api/videos/{id}/episodes/{ep}/playback"),
+        Some(json!({})),
+        token.as_deref(),
+    )
+    .await?;
+    normalize_playback(data, id, ep)
+}
+
+fn normalize_playback(data: Value, id: i64, ep: u32) -> Result<Value, String> {
+    let number = |value: &Value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.parse::<i64>().ok())
+    };
+    if data["manifest_method"] != "GET"
+        || number(&data["id"]) != Some(id)
+        || number(&data["ep"]) != Some(ep as i64)
+    {
+        return Err("播放接口返回的视频或集号不匹配".into());
+    }
+    let main = data["streams"]["main"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or("播放接口未返回可用地址，请稍后重试")?;
+    let hevc = data["streams"]["hevc"].as_str().unwrap_or("");
+    let proxy_url = crate::media::register_playback(main, hevc, data["cdn"].clone())?;
+    Ok(
+        json!({ "id": id, "ep_num": ep, "duration": 0, "title": "", "video_url": main,
+        "video_url_hevc": hevc, "proxy_url": proxy_url }),
+    )
 }
 
 /* ───────────────────────── 评论 / 互动 ───────────────────────── */
@@ -232,12 +267,7 @@ pub async fn api_comment_send(
 }
 
 #[tauri::command]
-pub async fn api_like(
-    state: State<'_, Api>,
-    id: i64,
-    ep: u32,
-    on: bool,
-) -> Result<Value, String> {
+pub async fn api_like(state: State<'_, Api>, id: i64, ep: u32, on: bool) -> Result<Value, String> {
     let method = if on { "POST" } else { "DELETE" };
     state
         .authed(method, &format!("/api/videos/{id}/like?ep={ep}"), None)
@@ -245,11 +275,7 @@ pub async fn api_like(
 }
 
 #[tauri::command]
-pub async fn api_collect(
-    state: State<'_, Api>,
-    id: i64,
-    on: bool,
-) -> Result<Value, String> {
+pub async fn api_collect(state: State<'_, Api>, id: i64, on: bool) -> Result<Value, String> {
     let method = if on { "POST" } else { "DELETE" };
     state
         .authed(method, &format!("/api/videos/{id}/collect"), None)
@@ -257,11 +283,7 @@ pub async fn api_collect(
 }
 
 #[tauri::command]
-pub async fn api_follow(
-    state: State<'_, Api>,
-    uid: i64,
-    on: bool,
-) -> Result<Value, String> {
+pub async fn api_follow(state: State<'_, Api>, uid: i64, on: bool) -> Result<Value, String> {
     let method = if on { "POST" } else { "DELETE" };
     state
         .authed(method, &format!("/api/users/{uid}/follow"), None)
@@ -304,4 +326,40 @@ pub async fn api_post_comments(
     state
         .get(&format!("/api/posts/{id}/comments?page={page}&size={size}"))
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn playback() -> Value {
+        json!({ "id": "12", "ep": 3, "manifest_method": "GET",
+            "streams": { "main": "https://media.example.test/main.m3u8", "hevc": "" },
+            "cdn": { "m3u8Enabled": true, "otherEnabled": false,
+                "authKey": "x-test-auth", "authValue": "fixture-secret", "app": "fixture-app" } })
+    }
+
+    #[test]
+    fn playback_contract_is_adapted_without_exposing_cdn_credentials() {
+        let normalized = normalize_playback(playback(), 12, 3).unwrap();
+        assert_eq!(normalized["ep_num"], 3);
+        assert_eq!(
+            normalized["video_url"],
+            "https://media.example.test/main.m3u8"
+        );
+        assert!(normalized["proxy_url"]
+            .as_str()
+            .unwrap()
+            .contains("/hls?u="));
+        assert!(!normalized.to_string().contains("fixture-secret"));
+    }
+
+    #[test]
+    fn wrong_identity_or_missing_stream_is_rejected() {
+        assert!(normalize_playback(playback(), 13, 3).is_err());
+        assert!(normalize_playback(playback(), 12, 4).is_err());
+        let mut empty = playback();
+        empty["streams"]["main"] = json!("");
+        assert!(normalize_playback(empty, 12, 3).is_err());
+    }
 }

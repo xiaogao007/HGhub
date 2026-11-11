@@ -27,8 +27,8 @@
 
 ### 0.2 边缘代理信封（关键）
 
-站点前端把**所有** `/api/**` 调用统一改写成一次 `POST /api/edge/request`，由边缘层转发到真实接口。
-客户端只实现这一个信封，就等于实现了全部接口，且**不需要处理 Cookie**（登录态用 Bearer）。
+这是原有的桥接入口，由边缘层转发业务请求。客户端的列表等调用目前仍使用此入口，登录态用 Bearer。
+播放接口已同时升级业务路径、加密传输和 CDN 临时凭据，见 §6.2，不能继续复用旧 GET 取址。
 
 ```
 POST https://huangguoai.com/api/edge/request
@@ -275,18 +275,40 @@ GET /api/videos/{id}
 
 ### 6.2 取指定集播放地址
 
+**2026-11 兼容说明：** 当前取址业务路径为 `POST /api/videos/{id}/episodes/{ep}/playback`，JSON 请求体 `{}`，通过 `POST /api/playback/request` 加密通道发送。
+旧 GET `/api/videos/{id}/play`（包括放入加密通道的旧路径）可能仍返回 `status: 1`，但 `video_url` 为空，不能视为可播放。
+新响应 `data` 包含 `id`、`ep`、`manifest_method: "GET"`、`streams: { main, hevc }`、`cdn` 与 `timestamp`。
+`cdn` 的 `m3u8Enabled` / `otherEnabled` 决定是否添加 `authKey: authValue` 和 `x-cdn-app: app`。
+这些凭据只保存在 Rust 内存中；前端获得 `proxy_url`，本地代理通过 `c` 上下文编号为对应源的请求附加凭据。
+嵌套 m3u8 继续走 `/hls`，key 与媒体分片走 `/seg`，上下文贯穿整个请求链。
+客户端在 `src-tauri/src/edge_crypto.rs` 实现当前公开的 `dx150-edge-v1` 协议：
+
+- `hello`：发送临时 P-256 公钥，使用服务端公钥协商共享密钥。
+- HKDF-SHA256：结合服务端 salt，以及协议/通道/site/kid/sid 上下文，分别派生请求和响应密钥。
+- `call`：AES-256-GCM 加密原始业务信封；nonce 使用 12 字节、大端序号，AAD 绑定方向、序号和服务端校正时间。
+- 校验响应的会话、序号、时间和认证标签，解密内层 HTTP 响应，再解析原有 JSON 信封。
+- 会话仅驻留内存；超过有效期或 16384 次请求后换钥。服务端明确返回 `session_expired` 时最多重握手重试一次。
+
+本地回归测试（不请求站点或媒体；需 Node.js）：`cd src-tauri && cargo test --offline`。
+线上握手自检（只请求无效 ID，不取媒体）：`cargo test live_playback_handshake -- --ignored`。
+线上取址结构自检（只检查地址非空与字段，不下载媒体）：`cargo test live_playback_contract -- --ignored`。
+原有依赖实时媒体或短期签名 URL 的测试默认忽略，需显式 `--ignored` 才执行。
+
 ```
-GET /api/videos/{id}/play?ep={集号}&page_texts=0
+POST /api/videos/{id}/episodes/{集号}/playback
+Content-Type: application/json
+{}
 ```
 
 ```json
-{ "id": 10769, "ep_num": 3, "duration": 147,
-  "video_url": "https://yd-lphu-hls.hzjvlo.cn/.../index.m3u8?auth_key=...",
-  "video_url_hevc": "", "title": "...", "page_title": "...", ... }
+{ "id": 10769, "ep": 3, "manifest_method": "GET",
+  "streams": { "main": "https://media.example.test/index.m3u8?...", "hevc": "" },
+  "cdn": { "m3u8Enabled": true, "otherEnabled": false,
+    "authKey": "<header-name>", "authValue": "<temporary-value>", "app": "<app>" },
+  "timestamp": 0 }
 ```
 
-- 无需登录；`video_url` 为 **HLS（m3u8）**，`auth_key` 带时效（约 1 小时），**播放前现取**，不要长期缓存。
-- 其余 `page_*` 为 SEO 字段，可忽略。
+- 主清单从 `streams.main` 获取。地址和 CDN 凭据具有时效，**播放前现取**，不要长期缓存；前端经规范化结果的 `proxy_url` 播放。
 
 ### 6.3 播放实现
 

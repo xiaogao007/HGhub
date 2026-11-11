@@ -5,6 +5,8 @@ node_modules/
 # 构建产物
 dist/
 dist-ssr/
+output/
+.playwright-cli/
 src-tauri/target/
 src-tauri/gen/
 *.local
